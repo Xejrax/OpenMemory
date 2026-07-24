@@ -1226,7 +1226,7 @@ export async function reinforce_memory(
     const mem = await q.get_mem.get(id);
     if (!mem) throw new Error(`Memory ${id} not found`);
     const new_sal = Math.min(reinforcement.max_salience, mem.salience + boost);
-    await q.upd_seen.run(Date.now(), new_sal, Date.now(), id);
+    await q.upd_seen.run(id, Date.now(), new_sal, Date.now());
     if (new_sal > 0.8) await log_maint_op("consolidate", 1);
 }
 export async function update_memory(

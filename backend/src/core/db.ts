@@ -593,10 +593,10 @@ if (is_pg) {
                 exec("update memories set feedback_score=? where id=?", p),
         },
         upd_seen: {
-            run: (...p) =>
+            run: (id, last_seen_at, salience, updated_at) =>
                 exec(
                     "update memories set last_seen_at=?,salience=?,updated_at=? where id=?",
-                    p,
+                    [last_seen_at, salience, updated_at, id],
                 ),
         },
         upd_mem: {
