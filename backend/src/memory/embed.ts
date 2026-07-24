@@ -9,13 +9,17 @@ import {
 } from "@aws-sdk/client-bedrock-runtime";
 
 let gem_q: Promise<any> = Promise.resolve();
-export const emb_dim = () => env.vec_dim;
+export const emb_dim = () => env.active_vec_dim;
+export type EmbeddingKind = "document" | "query";
 
 // Fetch with timeout to prevent hanging requests and enable fallback chain
-const EMBED_TIMEOUT_MS = Number(process.env.OM_EMBED_TIMEOUT_MS) || 30000;
-async function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+    url: string,
+    options: RequestInit,
+    timeout_ms = env.embedding_timeout_ms,
+): Promise<Response> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), timeout_ms);
     try {
         return await fetch(url, { ...options, signal: controller.signal });
     } finally {
@@ -76,17 +80,21 @@ const fuse_vecs = (syn: number[], sem: number[]): number[] => {
     return f;
 };
 
-export async function embedForSector(t: string, s: string): Promise<number[]> {
+export async function embedForSector(
+    t: string,
+    s: string,
+    kind: EmbeddingKind = "document",
+): Promise<number[]> {
     if (!sector_configs[s]) throw new Error(`Unknown sector: ${s}`);
     if (tier === "hybrid") return gen_syn_emb(t, s);
     if (tier === "smart" && env.emb_kind !== "synthetic") {
         const syn = gen_syn_emb(t, s),
-            sem = await get_sem_emb(t, s),
-            comp = compress_vec(sem, 128);
+            sem = await get_sem_emb(t, s, kind),
+            comp = compress_vec(sem, env.smart_compressed_dim);
         return fuse_vecs(syn, comp);
     }
     if (tier === "fast") return gen_syn_emb(t, s);
-    return await get_sem_emb(t, s);
+    return await get_sem_emb(t, s, kind);
 }
 
 /**
@@ -112,13 +120,16 @@ export async function embedQueryForAllSectors(
             for (const s of sectors) txts[s] = query;
             return await emb_gemini(txts);
         } catch (e) {
-            console.warn(`[EMBED] Gemini batch failed, falling back to sequential: ${e}`);
+            console.warn(
+                `[EMBED] Gemini batch failed, falling back to sequential: ${e}`,
+            );
         }
     }
 
     // Fallback: sequential embedding for each sector
     const result: Record<string, number[]> = {};
-    for (const s of sectors) result[s] = await embedForSector(query, s);
+    for (const s of sectors)
+        result[s] = await embedForSector(query, s, "query");
     return result;
 }
 
@@ -127,6 +138,7 @@ async function embed_with_provider(
     provider: string,
     t: string,
     s: string,
+    kind: EmbeddingKind,
 ): Promise<number[]> {
     switch (provider) {
         case "openai":
@@ -135,6 +147,8 @@ async function embed_with_provider(
             return (await emb_gemini({ [s]: t }))[s];
         case "ollama":
             return await emb_ollama(t, s);
+        case "fastembed":
+            return await emb_fastembed(t, kind);
         case "aws":
             return await emb_aws(t, s);
         case "local":
@@ -147,14 +161,20 @@ async function embed_with_provider(
 }
 
 // Get semantic embedding with configurable fallback chain
-async function get_sem_emb(t: string, s: string): Promise<number[]> {
+async function get_sem_emb(
+    t: string,
+    s: string,
+    kind: EmbeddingKind,
+): Promise<number[]> {
     // Deduplicate providers to avoid wasteful retries (e.g., gemini,gemini,synthetic)
-    const providers = [...new Set([env.emb_kind, ...env.embedding_fallback])];
+    const providers = env.embedding_strict
+        ? [env.emb_kind]
+        : [...new Set([env.emb_kind, ...env.embedding_fallback])];
 
     for (let i = 0; i < providers.length; i++) {
         const provider = providers[i];
         try {
-            const result = await embed_with_provider(provider, t, s);
+            const result = await embed_with_provider(provider, t, s, kind);
             if (i > 0) {
                 console.log(
                     `[EMBED] Fallback to ${provider} succeeded for sector: ${s}`,
@@ -170,6 +190,10 @@ async function get_sem_emb(t: string, s: string): Promise<number[]> {
                     `[EMBED] ${provider} failed: ${errMsg}, trying ${nextProvider}`,
                 );
             } else {
+                if (env.embedding_strict)
+                    throw new Error(
+                        `Strict embedding provider ${provider} failed: ${errMsg}`,
+                    );
                 console.error(
                     `[EMBED] All providers failed. Last error (${provider}): ${errMsg}. Using synthetic.`,
                 );
@@ -178,15 +202,18 @@ async function get_sem_emb(t: string, s: string): Promise<number[]> {
         }
     }
     // Fallback if providers array is empty (shouldn't happen with defaults)
+    if (env.embedding_strict)
+        throw new Error("Strict embedding provider chain is empty");
     return gen_syn_emb(t, s);
 }
-
 
 // Batch embedding with fallback chain support (for simple mode)
 async function emb_batch_with_fallback(
     txts: Record<string, string>,
 ): Promise<Record<string, number[]>> {
-    const providers = [...new Set([env.emb_kind, ...env.embedding_fallback])];
+    const providers = env.embedding_strict
+        ? [env.emb_kind]
+        : [...new Set([env.emb_kind, ...env.embedding_fallback])];
 
     for (let i = 0; i < providers.length; i++) {
         const provider = providers[i];
@@ -203,7 +230,12 @@ async function emb_batch_with_fallback(
                     // For providers without batch support, embed each sector individually
                     result = {};
                     for (const [s, t] of Object.entries(txts)) {
-                        result[s] = await embed_with_provider(provider, t, s);
+                        result[s] = await embed_with_provider(
+                            provider,
+                            t,
+                            s,
+                            "document",
+                        );
                     }
             }
             if (i > 0) {
@@ -221,6 +253,10 @@ async function emb_batch_with_fallback(
                     `[EMBED] ${provider} batch failed: ${errMsg}, trying ${nextProvider}`,
                 );
             } else {
+                if (env.embedding_strict)
+                    throw new Error(
+                        `Strict embedding provider ${provider} failed: ${errMsg}`,
+                    );
                 console.error(
                     `[EMBED] All providers failed for batch. Last error (${provider}): ${errMsg}. Using synthetic.`,
                 );
@@ -234,6 +270,8 @@ async function emb_batch_with_fallback(
         }
     }
     // Fallback if providers array is empty
+    if (env.embedding_strict)
+        throw new Error("Strict embedding provider chain is empty");
     const result: Record<string, number[]> = {};
     for (const [s, t] of Object.entries(txts)) {
         result[s] = gen_syn_emb(t, s);
@@ -255,7 +293,7 @@ async function emb_openai(t: string, s: string): Promise<number[]> {
             body: JSON.stringify({
                 input: t,
                 model: env.openai_model || m,
-                dimensions: env.vec_dim,
+                dimensions: env.semantic_vec_dim,
             }),
         },
     );
@@ -280,7 +318,7 @@ async function emb_batch_openai(
             body: JSON.stringify({
                 input: Object.values(txts),
                 model: env.openai_model || m,
-                dimensions: env.vec_dim,
+                dimensions: env.semantic_vec_dim,
             }),
         },
     );
@@ -338,7 +376,7 @@ async function emb_gemini(
                 for (const s of Object.keys(txts))
                     out[s] = resize_vec(
                         data.embeddings[i++].values,
-                        env.vec_dim,
+                        env.semantic_vec_dim,
                     );
                 await new Promise((x) => setTimeout(x, 1500));
                 return out;
@@ -367,7 +405,44 @@ async function emb_ollama(t: string, s: string): Promise<number[]> {
         body: JSON.stringify({ model: m, prompt: t }),
     });
     if (!r.ok) throw new Error(`Ollama: ${r.status}`);
-    return resize_vec(((await r.json()) as any).embedding, env.vec_dim);
+    return resize_vec(
+        ((await r.json()) as any).embedding,
+        env.semantic_vec_dim,
+    );
+}
+
+async function emb_fastembed(
+    t: string,
+    kind: EmbeddingKind,
+): Promise<number[]> {
+    const r = await fetchWithTimeout(
+        `${env.fastembed_url.replace(/\/$/, "")}/embed_nomic`,
+        {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: t, kind }),
+        },
+    );
+    if (!r.ok) throw new Error(`FastEmbed: ${r.status}`);
+    const payload = (await r.json()) as any;
+    if (
+        payload.model !== env.fastembed_model ||
+        payload.dim !== env.semantic_vec_dim ||
+        payload.token_cap !== env.embedding_max_tokens ||
+        !Array.isArray(payload.vec) ||
+        payload.vec.length !== env.semantic_vec_dim
+    ) {
+        throw new Error("FastEmbed model/dimension contract mismatch");
+    }
+    if (
+        payload.vec.some(
+            (value: unknown) =>
+                typeof value !== "number" || !Number.isFinite(value),
+        )
+    ) {
+        throw new Error("FastEmbed returned a non-finite vector");
+    }
+    return payload.vec;
 }
 async function emb_aws(t: string, s: string): Promise<number[]> {
     if (!env.AWS_REGION) throw new Error("AWS_REGION missing");
@@ -376,7 +451,7 @@ async function emb_aws(t: string, s: string): Promise<number[]> {
         throw new Error("AWS_SECRET_ACCESS_KEY missing");
     const m = get_model(s, "aws");
     const client = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
-    const dim = [256, 512, 1024].find((x) => x >= env.vec_dim) ?? 1024;
+    const dim = [256, 512, 1024].find((x) => x >= env.semantic_vec_dim) ?? 1024;
     const params = {
         modelId: m,
         contentType: "application/json",
@@ -393,7 +468,7 @@ async function emb_aws(t: string, s: string): Promise<number[]> {
 
         const jsonString = new TextDecoder().decode(response.body);
         const parsedResponse = JSON.parse(jsonString);
-        return resize_vec(parsedResponse, env.vec_dim);
+        return resize_vec(parsedResponse, env.semantic_vec_dim);
     } catch (error) {
         throw new Error(`AWS: ${error}`);
     }
@@ -410,7 +485,7 @@ async function emb_local(t: string, s: string): Promise<number[]> {
                 .update(t + s)
                 .digest(),
             e: number[] = [];
-        for (let i = 0; i < env.vec_dim; i++) {
+        for (let i = 0; i < env.semantic_vec_dim; i++) {
             const b1 = h[i % h.length],
                 b2 = h[(i + 1) % h.length];
             e.push(((b1 * 256 + b2) / 65535) * 2 - 1);
@@ -476,7 +551,7 @@ const norm_v = (v: Float32Array) => {
 };
 
 export function gen_syn_emb(t: string, s: string): number[] {
-    const d = env.vec_dim || 768,
+    const d = env.synthetic_vec_dim,
         v = new Float32Array(d).fill(0),
         ct = canonical_tokens_from_text(t);
     if (!ct.length) {
@@ -545,11 +620,15 @@ export async function embedMultiSector(
     txt: string,
     secs: string[],
     chunks?: Array<{ text: string }>,
+    options: { write_log?: boolean } = {},
 ): Promise<EmbeddingResult[]> {
     const r: EmbeddingResult[] = [];
-    await q.ins_log.run(id, "multi-sector", "pending", Date.now(), null);
+    const write_log = options.write_log !== false;
+    if (write_log)
+        await q.ins_log.run(id, "multi-sector", "pending", Date.now(), null);
     for (let a = 0; a < 3; a++) {
         try {
+            r.length = 0;
             const simp = env.embed_mode === "simple";
             if (
                 simp &&
@@ -598,15 +677,16 @@ export async function embedMultiSector(
                     }
                 }
             }
-            await q.upd_log.run("completed", null, id);
+            if (write_log) await q.upd_log.run("completed", null, id);
             return r;
         } catch (e) {
             if (a === 2) {
-                await q.upd_log.run(
-                    "failed",
-                    e instanceof Error ? e.message : String(e),
-                    id,
-                );
+                if (write_log)
+                    await q.upd_log.run(
+                        "failed",
+                        e instanceof Error ? e.message : String(e),
+                        id,
+                    );
                 throw e;
             }
             await new Promise((x) => setTimeout(x, 1000 * Math.pow(2, a)));
@@ -649,12 +729,66 @@ export const bufferToVector = (b: Buffer) => {
 };
 export const embed = (t: string) => embedForSector(t, "semantic");
 export const getEmbeddingProvider = () => env.emb_kind;
+export const runEmbeddingStartupCanary = async () => {
+    const canary = Promise.all([
+        embedForSector(
+            "OpenMemory document startup canary",
+            "semantic",
+            "document",
+        ),
+        embedForSector("OpenMemory query startup canary", "semantic", "query"),
+    ]);
+    let timeout_id: NodeJS.Timeout;
+    const timeout = new Promise<never>((_, reject) => {
+        timeout_id = setTimeout(
+            () => reject(new Error("Embedding startup canary timed out")),
+            env.embedding_startup_timeout_ms,
+        );
+    });
+    let vectors: [number[], number[]];
+    try {
+        vectors = await Promise.race([canary, timeout]);
+    } finally {
+        clearTimeout(timeout_id!);
+    }
+    const [document_vector, query_vector] = vectors;
+    for (const [kind, vector] of [
+        ["document", document_vector],
+        ["query", query_vector],
+    ] as const) {
+        if (
+            vector.length !== env.active_vec_dim ||
+            vector.some((value) => !Number.isFinite(value))
+        ) {
+            throw new Error(
+                `${kind} startup canary violated ${env.active_vec_dim}d contract`,
+            );
+        }
+    }
+    return {
+        provider: env.emb_kind,
+        model: env.fastembed_model,
+        dimension: env.active_vec_dim,
+        strict: env.embedding_strict,
+    };
+};
 
 export const getEmbeddingInfo = () => {
     const i: Record<string, any> = {
         provider: env.emb_kind,
         fallback_chain: env.embedding_fallback,
-        dimensions: env.vec_dim,
+        dimensions: env.active_vec_dim,
+        strict: env.embedding_strict,
+        token_cap: env.embedding_max_tokens,
+        dimension_contract: {
+            active: env.active_vec_dim,
+            semantic: env.semantic_vec_dim,
+            synthetic: env.synthetic_vec_dim,
+            smart_compressed: env.smart_compressed_dim,
+            smart_fused: env.smart_fused_dim,
+            decay_fingerprint: env.decay_fingerprint_dim,
+            decay_regen_max: env.decay_regen_max_dim,
+        },
         mode: env.embed_mode,
         batch_support:
             env.embed_mode === "simple" &&
@@ -695,6 +829,11 @@ export const getEmbeddingInfo = () => {
             emotional: get_model("emotional", "ollama"),
             reflective: get_model("reflective", "ollama"),
         };
+    } else if (env.emb_kind === "fastembed") {
+        i.configured = true;
+        i.url = env.fastembed_url;
+        i.model = env.fastembed_model;
+        i.document_query_contract = true;
     } else if (env.emb_kind === "local") {
         i.configured = !!env.local_model_path;
         i.path = env.local_model_path;

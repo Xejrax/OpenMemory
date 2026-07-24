@@ -19,6 +19,54 @@ export const tier = get_tier();
 const tier_dims = { fast: 256, smart: 384, deep: 1536, hybrid: 256 };
 const tier_cache = { fast: 2, smart: 3, deep: 5, hybrid: 3 };
 const tier_max_active = { fast: 32, smart: 64, deep: 128, hybrid: 64 };
+const path_dim_keys = [
+    "OM_SEMANTIC_VEC_DIM",
+    "OM_SYNTHETIC_VEC_DIM",
+    "OM_SMART_COMPRESSED_DIM",
+    "OM_DECAY_FINGERPRINT_DIM",
+    "OM_DECAY_REGEN_MAX_DIM",
+];
+const has_path_dims = path_dim_keys.some(
+    (key) => process.env[key] !== undefined,
+);
+if (process.env.OM_VEC_DIM !== undefined && has_path_dims) {
+    throw new Error(
+        "OM_VEC_DIM cannot be combined with path-specific dimension variables",
+    );
+}
+const legacy_vec_dim = process.env.OM_VEC_DIM
+    ? num(process.env.OM_VEC_DIM, tier_dims[tier])
+    : undefined;
+const semantic_vec_dim = num(
+    process.env.OM_SEMANTIC_VEC_DIM,
+    legacy_vec_dim ?? tier_dims[tier],
+);
+const synthetic_vec_dim = num(
+    process.env.OM_SYNTHETIC_VEC_DIM,
+    legacy_vec_dim ?? 256,
+);
+const smart_compressed_dim = num(process.env.OM_SMART_COMPRESSED_DIM, 128);
+const decay_fingerprint_dim = num(process.env.OM_DECAY_FINGERPRINT_DIM, 32);
+const decay_regen_max_dim = num(process.env.OM_DECAY_REGEN_MAX_DIM, 64);
+const active_vec_dim =
+    legacy_vec_dim ??
+    (tier === "deep"
+        ? semantic_vec_dim
+        : tier === "smart"
+          ? synthetic_vec_dim + smart_compressed_dim
+          : synthetic_vec_dim);
+for (const [name, value] of Object.entries({
+    semantic_vec_dim,
+    synthetic_vec_dim,
+    smart_compressed_dim,
+    decay_fingerprint_dim,
+    decay_regen_max_dim,
+    active_vec_dim,
+})) {
+    if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer`);
+    }
+}
 
 export const env = {
     port: num(process.env.OM_PORT, 8080),
@@ -42,6 +90,18 @@ export const env = {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+    embedding_strict: bool(process.env.OM_EMBEDDING_STRICT),
+    embedding_timeout_ms: num(process.env.OM_EMBEDDING_TIMEOUT_MS, 10000),
+    embedding_startup_timeout_ms: num(
+        process.env.OM_EMBEDDING_STARTUP_TIMEOUT_MS,
+        30000,
+    ),
+    embedding_max_tokens: num(process.env.OM_EMBEDDING_MAX_TOKENS, 1024),
+    fastembed_url: str(process.env.OM_FASTEMBED_URL, "http://127.0.0.1:7077"),
+    fastembed_model: str(
+        process.env.OM_FASTEMBED_MODEL,
+        "nomic-ai/nomic-embed-text-v1",
+    ),
     embed_mode: str(process.env.OM_EMBED_MODE, "simple"),
     adv_embed_parallel: bool(process.env.OM_ADV_EMBED_PARALLEL),
     embed_delay_ms: num(process.env.OM_EMBED_DELAY_MS, 200),
@@ -63,7 +123,14 @@ export const env = {
     ),
     local_model_path:
         process.env.LOCAL_MODEL_PATH || process.env.OM_LOCAL_MODEL_PATH || "",
-    vec_dim: num(process.env.OM_VEC_DIM, tier_dims[tier]),
+    semantic_vec_dim,
+    synthetic_vec_dim,
+    smart_compressed_dim,
+    smart_fused_dim: synthetic_vec_dim + smart_compressed_dim,
+    decay_fingerprint_dim,
+    decay_regen_max_dim,
+    active_vec_dim,
+    vec_dim: active_vec_dim,
     min_score: num(process.env.OM_MIN_SCORE, 0.3),
     decay_lambda: num(process.env.OM_DECAY_LAMBDA, 0.02),
     decay_interval_minutes: num(process.env.OM_DECAY_INTERVAL_MINUTES, 1440),
@@ -76,7 +143,10 @@ export const env = {
         process.env.OM_METADATA_BACKEND,
         "sqlite",
     ).toLowerCase(),
-    vector_backend: str(process.env.OM_VECTOR_BACKEND, "postgres").toLowerCase(),
+    vector_backend: str(
+        process.env.OM_VECTOR_BACKEND,
+        "postgres",
+    ).toLowerCase(),
     valkey_host: str(process.env.OM_VALKEY_HOST, "localhost"),
     valkey_port: num(process.env.OM_VALKEY_PORT, 6379),
     valkey_password: process.env.OM_VALKEY_PASSWORD,
@@ -102,7 +172,7 @@ export const env = {
         (process.env.OM_DECAY_REINFORCE_ON_QUERY ?? "true") !== "false",
     regeneration_enabled:
         (process.env.OM_REGENERATION_ENABLED ?? "true") !== "false",
-    max_vector_dim: num(process.env.OM_MAX_VECTOR_DIM, tier_dims[tier]),
+    max_vector_dim: num(process.env.OM_MAX_VECTOR_DIM, active_vec_dim),
     min_vector_dim: num(process.env.OM_MIN_VECTOR_DIM, 64),
     summary_layers: num(process.env.OM_SUMMARY_LAYERS, 3),
     keyword_boost: num(process.env.OM_KEYWORD_BOOST, 2.5),

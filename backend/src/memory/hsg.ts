@@ -108,10 +108,10 @@ export const sector_configs: Record<string, sector_cfg> = {
 export const sectors = Object.keys(sector_configs);
 export const scoring_weights = {
     similarity: 0.35,
-    overlap: 0.20,
+    overlap: 0.2,
     waypoint: 0.15,
-    recency: 0.10,
-    tag_match: 0.20,
+    recency: 0.1,
+    tag_match: 0.2,
 };
 export const hybrid_params = {
     tau: 3,
@@ -135,27 +135,55 @@ export const reinforcement = {
 // Sector relationship matrix for cross-sector retrieval
 // Higher values = stronger relationship = less penalty
 export const sector_relationships: Record<string, Record<string, number>> = {
-    semantic: { procedural: 0.8, episodic: 0.6, reflective: 0.7, emotional: 0.4 },
-    procedural: { semantic: 0.8, episodic: 0.6, reflective: 0.6, emotional: 0.3 },
-    episodic: { reflective: 0.8, semantic: 0.6, procedural: 0.6, emotional: 0.7 },
-    reflective: { episodic: 0.8, semantic: 0.7, procedural: 0.6, emotional: 0.6 },
-    emotional: { episodic: 0.7, reflective: 0.6, semantic: 0.4, procedural: 0.3 },
+    semantic: {
+        procedural: 0.8,
+        episodic: 0.6,
+        reflective: 0.7,
+        emotional: 0.4,
+    },
+    procedural: {
+        semantic: 0.8,
+        episodic: 0.6,
+        reflective: 0.6,
+        emotional: 0.3,
+    },
+    episodic: {
+        reflective: 0.8,
+        semantic: 0.6,
+        procedural: 0.6,
+        emotional: 0.7,
+    },
+    reflective: {
+        episodic: 0.8,
+        semantic: 0.7,
+        procedural: 0.6,
+        emotional: 0.6,
+    },
+    emotional: {
+        episodic: 0.7,
+        reflective: 0.6,
+        semantic: 0.4,
+        procedural: 0.3,
+    },
 };
 
 // Detect temporal markers in query for full-sector search
 function has_temporal_markers(text: string): boolean {
     const temporal_patterns = [
         /\b(today|yesterday|tomorrow|this\s+week|last\s+week|this\s+morning)\b/i,
-        /\b\d{4}-\d{2}-\d{2}\b/,  // ISO date format like 2025-11-20
+        /\b\d{4}-\d{2}-\d{2}\b/, // ISO date format like 2025-11-20
         /\b20\d{2}[/-]?(0[1-9]|1[0-2])[/-]?(0[1-9]|[12]\d|3[01])\b/, // Date patterns
         /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}/i,
-        /\bwhat\s+(did|have)\s+(i|we)\s+(do|done)\b/i,  // "what did I do" patterns
+        /\bwhat\s+(did|have)\s+(i|we)\s+(do|done)\b/i, // "what did I do" patterns
     ];
-    return temporal_patterns.some(p => p.test(text));
+    return temporal_patterns.some((p) => p.test(text));
 }
 
 // Calculate tag match score between query tokens and memory tags
-async function compute_tag_match_score(memory_id: string, query_tokens: Set<string>): Promise<number> {
+async function compute_tag_match_score(
+    memory_id: string,
+    query_tokens: Set<string>,
+): Promise<number> {
     const mem = await q.get_mem.get(memory_id);
     if (!mem?.tags) return 0;
 
@@ -168,11 +196,14 @@ async function compute_tag_match_score(memory_id: string, query_tokens: Set<stri
             const tag_lower = String(tag).toLowerCase();
             // Check exact match
             if (query_tokens.has(tag_lower)) {
-                matches += 2;  // Exact match bonus
+                matches += 2; // Exact match bonus
             } else {
                 // Check partial match
                 for (const token of query_tokens) {
-                    if (tag_lower.includes(token) || token.includes(tag_lower)) {
+                    if (
+                        tag_lower.includes(token) ||
+                        token.includes(tag_lower)
+                    ) {
                         matches += 1;
                     }
                 }
@@ -242,10 +273,10 @@ export function classify_content(
     const confidence =
         primaryScore > 0
             ? Math.min(
-                1.0,
-                primaryScore /
-                (primaryScore + (sortedScores[1]?.[1] || 0) + 1),
-            )
+                  1.0,
+                  primaryScore /
+                      (primaryScore + (sortedScores[1]?.[1] || 0) + 1),
+              )
             : 0.2;
     return {
         primary: primaryScore > 0 ? primary : "semantic",
@@ -367,7 +398,11 @@ export function extract_essence(
         if (/\b(I|my|me)\b/.test(s)) sc += 1;
         return sc;
     };
-    const scored = sents.map((s, idx) => ({ text: s, score: score_sent(s, idx), idx }));
+    const scored = sents.map((s, idx) => ({
+        text: s,
+        score: score_sent(s, idx),
+        idx,
+    }));
     scored.sort((a, b) => b.score - a.score);
     // Build result, ensuring first sentence is always included if space permits
     let comp = "";
@@ -528,7 +563,14 @@ export async function create_single_waypoint(
             ts,
         );
     } else {
-        await q.ins_waypoint.run(new_id, new_id, user_id || "anonymous", 1.0, ts, ts);
+        await q.ins_waypoint.run(
+            new_id,
+            new_id,
+            user_id || "anonymous",
+            1.0,
+            ts,
+            ts,
+        );
     }
 }
 export async function create_inter_mem_waypoints(
@@ -544,7 +586,10 @@ export async function create_inter_mem_waypoints(
     for (const vr of vecs) {
         if (vr.id === new_id) continue;
         const ex_vec = vr.vector;
-        const sim = cos_sim(new Float32Array(new_vec), new Float32Array(ex_vec));
+        const sim = cos_sim(
+            new Float32Array(new_vec),
+            new Float32Array(ex_vec),
+        );
         if (sim >= thresh) {
             await q.ins_waypoint.run(
                 new_id,
@@ -734,9 +779,17 @@ setInterval(async () => {
                 1,
                 cur_wt + hybrid_params.eta * (1 - cur_wt) * temp_fact,
             );
-            const user_id = wp?.user_id || memA?.user_id || memB?.user_id || "anonymous";
-            await q.ins_waypoint.run(a, b, user_id, new_wt, wp?.created_at || now, now);
-        } catch (e) { }
+            const user_id =
+                wp?.user_id || memA?.user_id || memB?.user_id || "anonymous";
+            await q.ins_waypoint.run(
+                a,
+                b,
+                user_id,
+                new_wt,
+                wp?.created_at || now,
+                now,
+            );
+        } catch (e) {}
     }
 }, 1000);
 const get_sal = async (id: string, def_sal: number): Promise<number> => {
@@ -797,7 +850,7 @@ export async function hsg_query(
         for (const s of ss) {
             const qv = qe[s];
             const results = await vector_store.searchSimilar(s, qv, k * 3);
-            sr[s] = results.map(r => ({ id: r.id, similarity: r.score }));
+            sr[s] = results.map((r) => ({ id: r.id, similarity: r.score }));
         }
         const all_sims = Object.values(sr).flatMap((r) =>
             r.slice(0, 8).map((x) => x.similarity),
@@ -859,9 +912,13 @@ export async function hsg_query(
             const mem_sector = m.primary_sector;
             const query_sector = qc.primary;
             let sector_penalty = 1.0;
-            if (mem_sector !== query_sector && !primary_sectors.includes(mem_sector)) {
+            if (
+                mem_sector !== query_sector &&
+                !primary_sectors.includes(mem_sector)
+            ) {
                 // Apply penalty based on sector relationship strength
-                sector_penalty = sector_relationships[query_sector]?.[mem_sector] || 0.3;
+                sector_penalty =
+                    sector_relationships[query_sector]?.[mem_sector] || 0.3;
             }
             const adjusted_sim = bs * sector_penalty;
 
@@ -979,7 +1036,7 @@ export async function hsg_query(
         for (const r of top) {
             on_query_hit(r.id, r.primary_sector, (text) =>
                 embedForSector(text, r.primary_sector),
-            ).catch(() => { });
+            ).catch(() => {});
         }
 
         cache.set(h, { r: top, t: Date.now() });
@@ -1008,6 +1065,48 @@ export async function run_decay_process(): Promise<{
     if (d > 0) await log_maint_op("decay", d);
     return { processed: p, decayed: d };
 }
+
+export interface StorageEmbeddingPlan {
+    primary: string;
+    sectors: string[];
+    chunks: ReturnType<typeof chunk_text>;
+    use_chunking: boolean;
+}
+
+export function deriveStorageEmbeddingPlan(
+    content: string,
+    metadata?: any,
+): StorageEmbeddingPlan {
+    const chunks = chunk_text(content);
+    const classification = classify_content(content, metadata);
+    return {
+        primary: classification.primary,
+        sectors: [classification.primary, ...classification.additional],
+        chunks,
+        use_chunking: chunks.length > 1,
+    };
+}
+
+export async function embedContentForStorage(
+    id: string,
+    content: string,
+    metadata?: any,
+    options: { write_log?: boolean } = {},
+): Promise<{
+    plan: StorageEmbeddingPlan;
+    embeddings: EmbeddingResult[];
+}> {
+    const plan = deriveStorageEmbeddingPlan(content, metadata);
+    const embeddings = await embedMultiSector(
+        id,
+        content,
+        plan.sectors,
+        plan.use_chunking ? plan.chunks : undefined,
+        options,
+    );
+    return { plan, embeddings };
+}
+
 export async function add_hsg_memory(
     content: string,
     tags?: string,
@@ -1035,10 +1134,7 @@ export async function add_hsg_memory(
     }
     const id = crypto.randomUUID();
     const now = Date.now();
-    const chunks = chunk_text(content);
-    const use_chunking = chunks.length > 1;
-    const classification = classify_content(content, metadata);
-    const all_sectors = [classification.primary, ...classification.additional];
+    const embedding_plan = deriveStorageEmbeddingPlan(content, metadata);
     await transaction.begin();
     try {
         const max_seg_res = await q.get_max_segment.get();
@@ -1054,13 +1150,13 @@ export async function add_hsg_memory(
         }
         const stored_content = extract_essence(
             content,
-            classification.primary,
+            embedding_plan.primary,
             env.summary_max_length,
         );
-        const sec_cfg = sector_configs[classification.primary];
+        const sec_cfg = sector_configs[embedding_plan.primary];
         const init_sal = Math.max(
             0,
-            Math.min(1, 0.4 + 0.1 * classification.additional.length),
+            Math.min(1, 0.4 + 0.1 * (embedding_plan.sectors.length - 1)),
         );
         await q.ins_mem.run(
             id,
@@ -1068,7 +1164,7 @@ export async function add_hsg_memory(
             cur_seg,
             stored_content,
             simhash,
-            classification.primary,
+            embedding_plan.primary,
             tags || null,
             JSON.stringify(metadata || {}),
             now,
@@ -1082,11 +1178,10 @@ export async function add_hsg_memory(
             null, // compressed_vec
             0, // feedback_score
         );
-        const emb_res = await embedMultiSector(
+        const { embeddings: emb_res } = await embedContentForStorage(
             id,
             content,
-            all_sectors,
-            use_chunking ? chunks : undefined,
+            metadata,
         );
         for (const result of emb_res) {
             await vector_store.storeVector(
@@ -1097,24 +1192,27 @@ export async function add_hsg_memory(
                 user_id || "anonymous",
             );
         }
-        const mean_vec = calc_mean_vec(emb_res, all_sectors);
+        const mean_vec = calc_mean_vec(emb_res, embedding_plan.sectors);
         const mean_vec_buf = vectorToBuffer(mean_vec);
         await q.upd_mean_vec.run(id, mean_vec.length, mean_vec_buf);
 
         // Store compressed vector for smart tier (for future query optimization)
-        if (tier === "smart" && mean_vec.length > 128) {
-            const comp = compress_vec_for_storage(mean_vec, 128);
+        if (tier === "smart" && mean_vec.length > env.smart_compressed_dim) {
+            const comp = compress_vec_for_storage(
+                mean_vec,
+                env.smart_compressed_dim,
+            );
             const comp_buf = vectorToBuffer(comp);
-            await q.upd_compressed_vec.run(comp_buf, id);
+            await q.upd_compressed_vec.run(id, comp_buf);
         }
 
         await create_single_waypoint(id, mean_vec, now, user_id);
         await transaction.commit();
         return {
             id,
-            primary_sector: classification.primary,
-            sectors: all_sectors,
-            chunks: chunks.length,
+            primary_sector: embedding_plan.primary,
+            sectors: embedding_plan.sectors,
+            chunks: embedding_plan.chunks.length,
         };
     } catch (error) {
         await transaction.rollback();
@@ -1145,20 +1243,9 @@ export async function update_memory(
     await transaction.begin();
     try {
         if (content !== undefined && content !== mem.content) {
-            const chunks = chunk_text(new_content);
-            const use_chunking = chunks.length > 1;
-            const classification = classify_content(new_content, metadata);
-            const all_sectors = [
-                classification.primary,
-                ...classification.additional,
-            ];
             await vector_store.deleteVectors(id);
-            const emb_res = await embedMultiSector(
-                id,
-                new_content,
-                all_sectors,
-                use_chunking ? chunks : undefined,
-            );
+            const { plan: embedding_plan, embeddings: emb_res } =
+                await embedContentForStorage(id, new_content, metadata);
             for (const result of emb_res) {
                 await vector_store.storeVector(
                     id,
@@ -1168,12 +1255,12 @@ export async function update_memory(
                     mem.user_id || "anonymous",
                 );
             }
-            const mean_vec = calc_mean_vec(emb_res, all_sectors);
+            const mean_vec = calc_mean_vec(emb_res, embedding_plan.sectors);
             const mean_vec_buf = vectorToBuffer(mean_vec);
             await q.upd_mean_vec.run(id, mean_vec.length, mean_vec_buf);
             await q.upd_mem_with_sector.run(
                 new_content,
-                classification.primary,
+                embedding_plan.primary,
                 new_tags,
                 new_meta,
                 Date.now(),

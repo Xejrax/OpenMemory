@@ -1,4 +1,10 @@
-import { all_async, run_async, q, vector_store, memories_table } from "../core/db";
+import {
+    all_async,
+    run_async,
+    q,
+    vector_store,
+    memories_table,
+} from "../core/db";
 import { now } from "../utils";
 import { env } from "../core/cfg";
 
@@ -62,7 +68,7 @@ const make_decay_cfg = (): decay_cfg => ({
         true,
     ),
     regeneration_enabled: parse_bool(process.env.OM_REGENERATION_ENABLED, true),
-    max_vec_dim: parse_int(process.env.OM_MAX_VECTOR_DIM, env.vec_dim || 1536),
+    max_vec_dim: parse_int(process.env.OM_MAX_VECTOR_DIM, env.active_vec_dim),
     min_vec_dim: parse_int(process.env.OM_MIN_VECTOR_DIM, 64),
     summary_layers: clamp_i(parse_int(process.env.OM_SUMMARY_LAYERS, 3), 1, 3),
     lambda_hot: 0.005,
@@ -124,7 +130,7 @@ const compress_summary = (txt: string, f: number, layers = 3): string => {
 
 const fingerprint_mem = (m: any): { vector: number[]; summary: string } => {
     const base = (m.id + "|" + (m.summary || m.content || "")).trim();
-    const vec = hash_to_vec(base, 32);
+    const vec = hash_to_vec(base, env.decay_fingerprint_dim);
     normalize(vec);
     const summary = top_keywords(m.summary || m.content || "", 3).join(" ");
     return { vector: vec, summary };
@@ -264,12 +270,12 @@ export const apply_decay = async () => {
                         tier === "hot"
                             ? cfg.lambda_hot
                             : tier === "warm"
-                                ? cfg.lambda_warm
-                                : cfg.lambda_cold;
+                              ? cfg.lambda_warm
+                              : cfg.lambda_cold;
                     const dt = Math.max(
                         0,
                         (now_ts - (m.last_seen_at || m.updated_at)) /
-                        cfg.time_unit_ms,
+                            cfg.time_unit_ms,
                     );
                     const act = Math.max(0, m.coactivations || 0);
                     const sal = clamp_f(
@@ -286,7 +292,10 @@ export const apply_decay = async () => {
 
                     if (f < 0.7) {
                         const sector = m.primary_sector || "semantic";
-                        const vec_row = await vector_store.getVector(m.id, sector);
+                        const vec_row = await vector_store.getVector(
+                            m.id,
+                            sector,
+                        );
 
                         if (vec_row && vec_row.vector) {
                             const vec =
@@ -395,7 +404,7 @@ export const on_query_hit = async (
                 typeof vec_row.vector === "string"
                     ? JSON.parse(vec_row.vector)
                     : vec_row.vector;
-            if (Array.isArray(vec) && vec.length <= 64) {
+            if (Array.isArray(vec) && vec.length <= env.decay_regen_max_dim) {
                 try {
                     const base = m.summary || m.content || "";
                     const new_vec = await reembed(base);
@@ -406,7 +415,7 @@ export const on_query_hit = async (
                         new_vec.length,
                     );
                     updated = true;
-                } catch (e) { }
+                } catch (e) {}
             }
         }
     }

@@ -15,6 +15,7 @@ type q_type = {
     upd_seen: { run: (...p: any[]) => Promise<void> };
     upd_mem: { run: (...p: any[]) => Promise<void> };
     upd_mem_with_sector: { run: (...p: any[]) => Promise<void> };
+    upd_primary_sector: { run: (...p: any[]) => Promise<void> };
     del_mem: { run: (...p: any[]) => Promise<void> };
     get_mem: { get: (id: string) => Promise<any> };
     get_mem_by_simhash: { get: (simhash: string) => Promise<any> };
@@ -72,8 +73,8 @@ if (is_pg) {
         process.env.OM_PG_SSL === "require"
             ? { rejectUnauthorized: false }
             : process.env.OM_PG_SSL === "disable"
-                ? false
-                : undefined;
+              ? false
+              : undefined;
     const db_name = process.env.OM_PG_DB || "openmemory";
     const pool = (db: string) =>
         new Pool({
@@ -204,7 +205,10 @@ if (is_pg) {
             console.log("[DB] Using Valkey VectorStore");
         } else {
             const vt = process.env.OM_VECTOR_TABLE || "openmemory_vectors";
-            vector_store = new PostgresVectorStore({ run_async, get_async, all_async }, v.replace(/"/g, ""));
+            vector_store = new PostgresVectorStore(
+                { run_async, get_async, all_async },
+                v.replace(/"/g, ""),
+            );
             console.log(`[DB] Using Postgres VectorStore with table: ${v}`);
         }
     };
@@ -266,6 +270,10 @@ if (is_pg) {
                     `update ${m} set content=$1,primary_sector=$2,tags=$3,meta=$4,updated_at=$5,version=version+1 where id=$6`,
                     p,
                 ),
+        },
+        upd_primary_sector: {
+            run: (...p) =>
+                run_async(`update ${m} set primary_sector=$2 where id=$1`, p),
         },
         del_mem: {
             run: (...p) => run_async(`delete from ${m} where id=$1`, p),
@@ -417,8 +425,7 @@ if (is_pg) {
     };
 } else {
     const db_path =
-        env.db_path ||
-        path.resolve(__dirname, "../../data/openmemory.sqlite");
+        env.db_path || path.resolve(__dirname, "../../data/openmemory.sqlite");
     const dir = path.dirname(db_path);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const db = new sqlite3.Database(db_path);
@@ -530,7 +537,7 @@ if (is_pg) {
     all_async = many;
 
     // Initialize VectorStore (SQLite fallback uses PostgresVectorStore logic but with SQLite db ops)
-    // Note: PostgresVectorStore uses SQL syntax which might be compatible with SQLite for simple things, 
+    // Note: PostgresVectorStore uses SQL syntax which might be compatible with SQLite for simple things,
     // but `bytea` vs `blob` might differ.
     // However, the interface implementation I wrote uses `run_async` etc.
     // I should probably rename PostgresVectorStore to SqlVectorStore or similar if it supports both.
@@ -544,8 +551,13 @@ if (is_pg) {
         vector_store = new ValkeyVectorStore();
         console.log("[DB] Using Valkey VectorStore");
     } else {
-        vector_store = new PostgresVectorStore({ run_async, get_async, all_async }, sqlite_vector_table);
-        console.log(`[DB] Using SQLite VectorStore with table: ${sqlite_vector_table}`);
+        vector_store = new PostgresVectorStore(
+            { run_async, get_async, all_async },
+            sqlite_vector_table,
+        );
+        console.log(
+            `[DB] Using SQLite VectorStore with table: ${sqlite_vector_table}`,
+        );
     }
 
     transaction = {
@@ -562,12 +574,19 @@ if (is_pg) {
                 ),
         },
         upd_mean_vec: {
-            run: (...p) =>
-                exec("update memories set mean_dim=?,mean_vec=? where id=?", p),
+            run: (id, dim, vector) =>
+                exec("update memories set mean_dim=?,mean_vec=? where id=?", [
+                    dim,
+                    vector,
+                    id,
+                ]),
         },
         upd_compressed_vec: {
-            run: (...p) =>
-                exec("update memories set compressed_vec=? where id=?", p),
+            run: (id, vector) =>
+                exec("update memories set compressed_vec=? where id=?", [
+                    vector,
+                    id,
+                ]),
         },
         upd_feedback: {
             run: (...p) =>
@@ -593,6 +612,13 @@ if (is_pg) {
                     "update memories set content=?,primary_sector=?,tags=?,meta=?,updated_at=?,version=version+1 where id=?",
                     p,
                 ),
+        },
+        upd_primary_sector: {
+            run: (id, sector) =>
+                exec("update memories set primary_sector=? where id=?", [
+                    sector,
+                    id,
+                ]),
         },
         del_mem: { run: (...p) => exec("delete from memories where id=?", p) },
         get_mem: {
@@ -753,4 +779,12 @@ export const log_maint_op = async (
     }
 };
 
-export { q, transaction, all_async, get_async, run_async, memories_table, vector_store };
+export {
+    q,
+    transaction,
+    all_async,
+    get_async,
+    run_async,
+    memories_table,
+    vector_store,
+};
