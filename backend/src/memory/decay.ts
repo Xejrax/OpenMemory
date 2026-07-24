@@ -247,7 +247,7 @@ export const apply_decay = async () => {
     for (const seg of segments) {
         const segment = seg.segment;
         const rows = await all_async(
-            "select id,content,summary,salience,decay_lambda,last_seen_at,updated_at,primary_sector,coactivations from memories where segment=?",
+            "select id,content,content as summary,salience,decay_lambda,last_seen_at,updated_at,primary_sector,0 as coactivations from memories where segment=?",
             [segment],
         );
 
@@ -313,12 +313,6 @@ export const apply_decay = async () => {
                                     cfg.min_vec_dim,
                                     cfg.max_vec_dim,
                                 );
-                                const new_summary = compress_summary(
-                                    m.summary || m.content || "",
-                                    f,
-                                    cfg.summary_layers,
-                                );
-
                                 if (new_vec.length < before_len) {
                                     await vector_store.storeVector(
                                         m.id,
@@ -328,13 +322,6 @@ export const apply_decay = async () => {
                                     );
                                     compressed = true;
                                     tot_comp++;
-                                }
-
-                                if (new_summary !== (m.summary || "")) {
-                                    await run_async(
-                                        "update memories set summary=? where id=?",
-                                        [new_summary, m.id],
-                                    );
                                 }
                             }
                         }
@@ -349,10 +336,6 @@ export const apply_decay = async () => {
                             sector,
                             fp.vector,
                             fp.vector.length,
-                        );
-                        await run_async(
-                            "update memories set summary=? where id=?",
-                            [fp.summary, m.id],
                         );
                         fingerprinted = true;
                         tot_fp++;
