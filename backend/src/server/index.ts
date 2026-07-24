@@ -105,13 +105,19 @@ const start = async () => {
         },
         7 * 24 * 60 * 60 * 1000,
     );
-    run_decay_process()
-        .then((result: any) => {
-            console.log(
-                `[INIT] Initial decay: ${result.decayed}/${result.processed} memories updated`,
-            );
-        })
-        .catch(console.error);
+    if (env.decay_on_startup) {
+        run_decay_process()
+            .then((result: any) => {
+                console.log(
+                    `[INIT] Initial decay: ${result.decayed}/${result.processed} memories updated`,
+                );
+            })
+            .catch(console.error);
+    } else {
+        console.log(
+            "[INIT] Startup decay disabled by OM_DECAY_ON_STARTUP=false",
+        );
+    }
 
     start_reflection();
     start_user_summary_reflection();

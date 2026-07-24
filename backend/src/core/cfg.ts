@@ -134,6 +134,8 @@ export const env = {
     min_score: num(process.env.OM_MIN_SCORE, 0.3),
     decay_lambda: num(process.env.OM_DECAY_LAMBDA, 0.02),
     decay_interval_minutes: num(process.env.OM_DECAY_INTERVAL_MINUTES, 1440),
+    decay_on_startup:
+        (process.env.OM_DECAY_ON_STARTUP ?? "true").toLowerCase() !== "false",
     max_payload_size: num(process.env.OM_MAX_PAYLOAD_SIZE, 1_000_000),
     mode: str(process.env.OM_MODE, "standard").toLowerCase(),
     lg_namespace: str(process.env.OM_LG_NAMESPACE, "default"),
