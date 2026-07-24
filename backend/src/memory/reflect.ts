@@ -1,6 +1,7 @@
 import { q, log_maint_op } from "../core/db";
 import { add_hsg_memory } from "./hsg";
 import { env } from "../core/cfg";
+import { track_active_work } from "../core/active_work";
 import { j } from "../utils";
 
 const cos = (a: number[], b: number[]): number => {
@@ -145,20 +146,31 @@ export const run_reflection = async () => {
 };
 
 let timer: NodeJS.Timeout | null = null;
+let active_job: Promise<unknown> | null = null;
 
 export const start_reflection = () => {
     if (!env.auto_reflect || timer) return;
     const int = (env.reflect_interval || 10) * 60000;
-    timer = setInterval(
-        () => run_reflection().catch((e) => console.error("[REFLECT]", e)),
-        int,
-    );
+    timer = setInterval(() => {
+        if (active_job) {
+            console.error("[REFLECT] skipped overlapping interval");
+            return;
+        }
+        const observed = track_active_work("reflection", run_reflection());
+        active_job = observed;
+        void observed
+            .catch((e) => console.error("[REFLECT]", e))
+            .finally(() => {
+                if (active_job === observed) active_job = null;
+            });
+    }, int);
     console.log(`[REFLECT] Started: every ${env.reflect_interval || 10}m`);
 };
 
-export const stop_reflection = () => {
+export const stop_reflection = async (): Promise<void> => {
     if (timer) {
         clearInterval(timer);
         timer = null;
     }
+    if (active_job) await Promise.allSettled([active_job]);
 };

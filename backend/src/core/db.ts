@@ -3,6 +3,8 @@ import { Pool, PoolClient } from "pg";
 import { env } from "./cfg";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { VectorStore } from "./vector_store";
 import { PostgresVectorStore } from "./vector/postgres";
 import { ValkeyVectorStore } from "./vector/valkey";
@@ -60,6 +62,90 @@ let vector_store: VectorStore;
 let memories_table: string;
 
 const is_pg = env.metadata_backend === "postgres";
+export const database_backend = is_pg ? "postgres" : "sqlite";
+export const database_path = is_pg ? "" : path.resolve(env.db_path);
+
+export type TransactionHandle = {
+    run: (sql: string, params?: any[]) => Promise<void>;
+    get: (sql: string, params?: any[]) => Promise<any>;
+    all: (sql: string, params?: any[]) => Promise<any[]>;
+};
+
+type TransactionContext = {
+    id: string;
+    tx: TransactionHandle;
+    state: "active" | "committing" | "rolling_back";
+};
+
+class AsyncMutex {
+    private locked = false;
+    private waiters: Array<(release: () => void) => void> = [];
+
+    async acquire(): Promise<() => void> {
+        if (!this.locked) {
+            this.locked = true;
+            return this.release_factory();
+        }
+        return await new Promise((resolve) => this.waiters.push(resolve));
+    }
+
+    try_acquire(): (() => void) | null {
+        if (this.locked || this.waiters.length > 0) return null;
+        this.locked = true;
+        return this.release_factory();
+    }
+
+    private release_factory(): () => void {
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            const next = this.waiters.shift();
+            if (next) next(this.release_factory());
+            else this.locked = false;
+        };
+    }
+}
+
+const transaction_context = new AsyncLocalStorage<TransactionContext>();
+const transaction_checkpoint_mutex = new AsyncMutex();
+let quiescing = false;
+let active_operations = 0;
+const quiesce_waiters = new Set<() => void>();
+let database_ready: Promise<void> = Promise.resolve();
+let raw_run: (sql: string, p?: any[]) => Promise<void>;
+let raw_get: (sql: string, p?: any[]) => Promise<any>;
+let raw_all: (sql: string, p?: any[]) => Promise<any[]>;
+let queue_fence: () => Promise<void> = async () => {};
+let close_database_impl: () => Promise<void> = async () => {};
+
+const enter_operation = (): (() => void) => {
+    if (quiescing) throw new Error("DATABASE_QUIESCING");
+    active_operations++;
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        active_operations--;
+        if (active_operations === 0) {
+            for (const resolve of quiesce_waiters) resolve();
+            quiesce_waiters.clear();
+        }
+    };
+};
+
+const run_public_operation = async <T>(
+    operation: () => Promise<T>,
+): Promise<T> => {
+    if (transaction_context.getStore()) return await operation();
+    const leave = enter_operation();
+    try {
+        await database_ready;
+        return await operation();
+    } finally {
+        leave();
+    }
+};
 
 // Convert SQLite-style ? placeholders to PostgreSQL $1, $2, $3 placeholders
 function convertPlaceholders(sql: string): string {
@@ -98,6 +184,11 @@ if (is_pg) {
         const c = cli || pg;
         return (await c.query(convertPlaceholders(sql), p)).rows;
     };
+    raw_run = async (sql, p = []) => {
+        await exec(sql, p);
+    };
+    raw_get = async (sql, p = []) => (await exec(sql, p))[0];
+    raw_all = async (sql, p = []) => await exec(sql, p);
     run_async = async (sql, p = []) => {
         await exec(sql, p);
     };
@@ -214,11 +305,18 @@ if (is_pg) {
     };
     init().catch((err) => {
         console.error("[DB] Init failed:", err);
-        process.exit(1);
+        process.exitCode = 1;
     });
+    database_ready = wait_ready();
+    queue_fence = async () => {
+        await database_ready;
+        await pg.query("SELECT 1");
+    };
+    close_database_impl = async () => {
+        await pg.end();
+    };
     const safe_exec = async (sql: string, p: any[] = []) => {
-        await wait_ready();
-        return exec(sql, p);
+        return await run_public_operation(() => exec(sql, p));
     };
     run_async = async (sql, p = []) => {
         await safe_exec(sql, p);
@@ -424,8 +522,7 @@ if (is_pg) {
         },
     };
 } else {
-    const db_path =
-        env.db_path || path.resolve(__dirname, "../../data/openmemory.sqlite");
+    const db_path = database_path;
     const dir = path.dirname(db_path);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const db = new sqlite3.Database(db_path);
@@ -519,22 +616,46 @@ if (is_pg) {
             "create index if not exists idx_edges_validity on temporal_edges(valid_from,valid_to)",
         );
     });
+    database_ready = new Promise<void>((resolve, reject) => {
+        (db as any).wait((error: Error | null) =>
+            error ? reject(error) : resolve(),
+        );
+    });
     memories_table = "memories";
-    const exec = (sql: string, p: any[] = []) =>
+    const exec_raw = (sql: string, p: any[] = []) =>
         new Promise<void>((ok, no) =>
             db.run(sql, p, (err) => (err ? no(err) : ok())),
         );
-    const one = (sql: string, p: any[] = []) =>
+    const one_raw = (sql: string, p: any[] = []) =>
         new Promise<any>((ok, no) =>
             db.get(sql, p, (err, row) => (err ? no(err) : ok(row))),
         );
-    const many = (sql: string, p: any[] = []) =>
+    const many_raw = (sql: string, p: any[] = []) =>
         new Promise<any[]>((ok, no) =>
             db.all(sql, p, (err, rows) => (err ? no(err) : ok(rows))),
         );
+    raw_run = exec_raw;
+    raw_get = one_raw;
+    raw_all = many_raw;
+    const exec = (sql: string, p: any[] = []) =>
+        run_public_operation(() => exec_raw(sql, p));
+    const one = (sql: string, p: any[] = []) =>
+        run_public_operation(() => one_raw(sql, p));
+    const many = (sql: string, p: any[] = []) =>
+        run_public_operation(() => many_raw(sql, p));
     run_async = exec;
     get_async = one;
     all_async = many;
+    queue_fence = () =>
+        new Promise<void>((resolve, reject) => {
+            (db as any).wait((error: Error | null) =>
+                error ? reject(error) : resolve(),
+            );
+        });
+    close_database_impl = () =>
+        new Promise<void>((resolve, reject) => {
+            db.close((error) => (error ? reject(error) : resolve()));
+        });
 
     // Initialize VectorStore (SQLite fallback uses PostgresVectorStore logic but with SQLite db ops)
     // Note: PostgresVectorStore uses SQL syntax which might be compatible with SQLite for simple things,
@@ -561,9 +682,9 @@ if (is_pg) {
     }
 
     transaction = {
-        begin: () => exec("BEGIN TRANSACTION"),
-        commit: () => exec("COMMIT"),
-        rollback: () => exec("ROLLBACK"),
+        begin: () => exec_raw("BEGIN TRANSACTION"),
+        commit: () => exec_raw("COMMIT"),
+        rollback: () => exec_raw("ROLLBACK"),
     };
     q = {
         ins_mem: {
@@ -779,12 +900,137 @@ export const log_maint_op = async (
     }
 };
 
-export {
-    q,
-    transaction,
-    all_async,
-    get_async,
-    run_async,
-    memories_table,
-    vector_store,
+export const wait_for_database_ready = async (): Promise<void> => {
+    await database_ready;
 };
+
+export const with_transaction = async <T>(
+    callback: (tx: TransactionHandle) => Promise<T>,
+): Promise<T> => {
+    if (transaction_context.getStore()) {
+        throw new Error("NESTED_TRANSACTION_UNSUPPORTED");
+    }
+    const leave = enter_operation();
+    let release_mutex: (() => void) | null = null;
+    try {
+        await database_ready;
+        release_mutex = await transaction_checkpoint_mutex.acquire();
+        const tx: TransactionHandle = {
+            run: async (sql, params = []) => await raw_run(sql, params),
+            get: async (sql, params = []) => await raw_get(sql, params),
+            all: async (sql, params = []) => await raw_all(sql, params),
+        };
+        const context: TransactionContext = {
+            id: crypto.randomUUID(),
+            tx,
+            state: "active",
+        };
+        return await transaction_context.run(context, async () => {
+            await transaction.begin();
+            try {
+                const result = await callback(tx);
+                context.state = "committing";
+                await transaction.commit();
+                return result;
+            } catch (error) {
+                context.state = "rolling_back";
+                try {
+                    await transaction.rollback();
+                } catch (rollback_error) {
+                    console.error(
+                        "[DB] transaction rollback failed",
+                        rollback_error,
+                    );
+                }
+                throw error;
+            }
+        });
+    } finally {
+        release_mutex?.();
+        leave();
+    }
+};
+
+export const begin_db_quiesce = (): void => {
+    quiescing = true;
+};
+
+export const wait_for_db_quiescence = async (): Promise<void> => {
+    if (active_operations > 0) {
+        await new Promise<void>((resolve) => quiesce_waiters.add(resolve));
+    }
+    const release = await transaction_checkpoint_mutex.acquire();
+    try {
+        await queue_fence();
+    } finally {
+        release();
+    }
+};
+
+export type CheckpointResult = {
+    busy: number;
+    frames_in_wal: number;
+    frames_checkpointed: number;
+    skipped_transaction_busy?: boolean;
+};
+
+const checkpoint_result = (rows: any[]): CheckpointResult => {
+    const row = rows[0] || {};
+    const values = Object.values(row).map((value) => Number(value));
+    return {
+        busy: Number(row.busy ?? values[0] ?? 0),
+        frames_in_wal: Number(row.log ?? values[1] ?? 0),
+        frames_checkpointed: Number(row.checkpointed ?? values[2] ?? 0),
+    };
+};
+
+export const run_passive_checkpoint = async (): Promise<CheckpointResult> => {
+    if (is_pg) {
+        return { busy: 0, frames_in_wal: 0, frames_checkpointed: 0 };
+    }
+    const release = transaction_checkpoint_mutex.try_acquire();
+    if (!release) {
+        return {
+            busy: 0,
+            frames_in_wal: 0,
+            frames_checkpointed: 0,
+            skipped_transaction_busy: true,
+        };
+    }
+    try {
+        await database_ready;
+        return checkpoint_result(
+            await raw_all("PRAGMA wal_checkpoint(PASSIVE)"),
+        );
+    } finally {
+        release();
+    }
+};
+
+export const run_truncate_checkpoint = async (): Promise<CheckpointResult> => {
+    if (is_pg) {
+        return { busy: 0, frames_in_wal: 0, frames_checkpointed: 0 };
+    }
+    const release = await transaction_checkpoint_mutex.acquire();
+    try {
+        await database_ready;
+        return checkpoint_result(
+            await raw_all("PRAGMA wal_checkpoint(TRUNCATE)"),
+        );
+    } finally {
+        release();
+    }
+};
+
+export const close_database = async (): Promise<void> => {
+    await close_database_impl();
+};
+
+export const database_lifecycle_snapshot = () => ({
+    backend: database_backend,
+    path: database_path,
+    quiescing,
+    active_operations,
+});
+
+export { q, all_async, get_async, run_async, memories_table, vector_store };

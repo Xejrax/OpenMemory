@@ -1,5 +1,5 @@
 import { add_hsg_memory } from "../memory/hsg";
-import { q, transaction } from "../core/db";
+import { q, with_transaction } from "../core/db";
 import { rid, now, j } from "../utils";
 import { extractText, ExtractionResult } from "./extract";
 
@@ -44,8 +44,7 @@ const mkRoot = async (
     const cnt = `[Document: ${ex.metadata.content_type.toUpperCase()}]\n\n${sum}\n\n[Full content split across ${Math.ceil(txt.length / SEC)} sections]`;
     const id = rid(),
         ts = now();
-    await transaction.begin();
-    try {
+    return await with_transaction(async () => {
         await q.ins_mem.run(
             id,
             cnt,
@@ -67,13 +66,11 @@ const mkRoot = async (
             user_id || "anonymous",
             null,
         );
-        await transaction.commit();
         return id;
-    } catch (e) {
+    }).catch((e) => {
         console.error("[ERROR] Root failed:", e);
-        await transaction.rollback();
         throw e;
-    }
+    });
 };
 
 const mkChild = async (
@@ -106,18 +103,15 @@ const link = async (
     user_id?: string | null,
 ) => {
     const ts = now();
-    await transaction.begin();
-    try {
+    await with_transaction(async () => {
         await q.ins_waypoint.run(rid, cid, user_id || "anonymous", 1.0, ts, ts);
-        await transaction.commit();
         console.log(
             `[INGEST] Linked: ${rid.slice(0, 8)} -> ${cid.slice(0, 8)} (section ${idx})`,
         );
-    } catch (e) {
-        await transaction.rollback();
+    }).catch((e) => {
         console.error(`[INGEST] Link failed for section ${idx}:`, e);
         throw e;
-    }
+    });
 };
 
 export async function ingestDocument(

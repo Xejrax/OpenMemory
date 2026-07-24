@@ -112,7 +112,10 @@ function server(config = {}) {
     };
     const add = (a, b, c) => { ROUTES.push({ method: a.toUpperCase(), path: b, handler: c }); };
     const use = (a) => { WARES.push(a); };
-    const listen = (a, b) => { SERVER.setTimeout(10000); SERVER.listen(a, b); };
+    const listen = (a, b) => {
+        SERVER.setTimeout(10000);
+        return SERVER.listen(a, b);
+    };
     const all = (a, b) => { add('ALL', a, b); };
     const getRoutes = () => ROUTES.reduce((acc, { method, path }) => ((acc[method] = acc[method] || []).push(path), acc), {});
     const serverStatic = (endpoint, dir) => {

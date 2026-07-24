@@ -10,6 +10,7 @@
         "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
         "build": "tsc -p tsconfig.json",
         "test:contracts": "tsx tests/verify_fastembed_db_contracts.mts",
+        "test:checkpoint": "tsx tests/verify_sqlite_checkpoint_lifecycle.mts",
         "start": "node dist/server/index.js",
         "migrate": "tsx src/migrate.ts"
     },

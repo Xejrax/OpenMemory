@@ -1,5 +1,6 @@
 import { q } from "../core/db";
 import { env } from "../core/cfg";
+import { track_active_work } from "../core/active_work";
 
 const cos = (a: number[], b: number[]): number => {
     let d = 0,
@@ -118,22 +119,33 @@ export const auto_update_user_summaries = async (): Promise<{
 };
 
 let timer: NodeJS.Timeout | null = null;
+let active_job: Promise<unknown> | null = null;
 
 export const start_user_summary_reflection = () => {
     if (timer) return;
     const int = (env.user_summary_interval || 30) * 60000;
-    timer = setInterval(
-        () =>
-            auto_update_user_summaries().catch((e) =>
-                console.error("[USER_SUMMARY]", e),
-            ),
-        int,
-    );
+    timer = setInterval(() => {
+        if (active_job) {
+            console.error("[USER_SUMMARY] skipped overlapping interval");
+            return;
+        }
+        const observed = track_active_work(
+            "user-summary",
+            auto_update_user_summaries(),
+        );
+        active_job = observed;
+        void observed
+            .catch((e) => console.error("[USER_SUMMARY]", e))
+            .finally(() => {
+                if (active_job === observed) active_job = null;
+            });
+    }, int);
 };
 
-export const stop_user_summary_reflection = () => {
+export const stop_user_summary_reflection = async (): Promise<void> => {
     if (timer) {
         clearInterval(timer);
         timer = null;
     }
+    if (active_job) await Promise.allSettled([active_job]);
 };

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { canonical_token_set } from "../utils/text";
 import { inc_q, dec_q, on_query_hit } from "./decay";
 import { env, tier } from "../core/cfg";
+import { track_active_work } from "../core/active_work";
 import { cos_sim, buf_to_vec, vec_to_buf } from "../utils/index";
 export interface sector_cfg {
     model: string;
@@ -477,7 +478,7 @@ import {
     get_async,
     all_async,
     run_async,
-    transaction,
+    with_transaction,
     log_maint_op,
 } from "../core/db";
 export async function create_cross_sector_waypoints(
@@ -1034,9 +1035,15 @@ export async function hsg_query(
         }
 
         for (const r of top) {
-            on_query_hit(r.id, r.primary_sector, (text) =>
-                embedForSector(text, r.primary_sector),
-            ).catch(() => {});
+            const reinforcement = track_active_work(
+                "query-hit",
+                on_query_hit(r.id, r.primary_sector, (text) =>
+                    embedForSector(text, r.primary_sector),
+                ),
+            );
+            void reinforcement.catch((error) =>
+                console.error("[QUERY_HIT] reinforcement failed", error),
+            );
         }
 
         cache.set(h, { r: top, t: Date.now() });
@@ -1135,8 +1142,7 @@ export async function add_hsg_memory(
     const id = crypto.randomUUID();
     const now = Date.now();
     const embedding_plan = deriveStorageEmbeddingPlan(content, metadata);
-    await transaction.begin();
-    try {
+    return await with_transaction(async () => {
         const max_seg_res = await q.get_max_segment.get();
         let cur_seg = max_seg_res?.max_seg ?? 0;
         const seg_cnt_res = await q.get_segment_count.get(cur_seg);
@@ -1207,17 +1213,13 @@ export async function add_hsg_memory(
         }
 
         await create_single_waypoint(id, mean_vec, now, user_id);
-        await transaction.commit();
         return {
             id,
             primary_sector: embedding_plan.primary,
             sectors: embedding_plan.sectors,
             chunks: embedding_plan.chunks.length,
         };
-    } catch (error) {
-        await transaction.rollback();
-        throw error;
-    }
+    });
 }
 export async function reinforce_memory(
     id: string,
@@ -1240,8 +1242,7 @@ export async function update_memory(
     const new_content = content !== undefined ? content : mem.content;
     const new_tags = tags !== undefined ? j(tags) : mem.tags || "[]";
     const new_meta = metadata !== undefined ? j(metadata) : mem.meta || "{}";
-    await transaction.begin();
-    try {
+    return await with_transaction(async () => {
         if (content !== undefined && content !== mem.content) {
             await vector_store.deleteVectors(id);
             const { plan: embedding_plan, embeddings: emb_res } =
@@ -1275,10 +1276,6 @@ export async function update_memory(
                 id,
             );
         }
-        await transaction.commit();
         return { id, updated: true };
-    } catch (error) {
-        await transaction.rollback();
-        throw error;
-    }
+    });
 }
