@@ -1107,6 +1107,33 @@ export async function embedContentForStorage(
     return { plan, embeddings };
 }
 
+// Similarity fingerprints cannot establish exact delivery. Preserve them for
+// compatibility and separately hash the complete original JSON write identity.
+export function canonical_ingest_json(value: any): string {
+    const normalized = JSON.parse(JSON.stringify(value));
+    const ordered = (item: any): any => {
+        if (Array.isArray(item)) return item.map(ordered);
+        if (item !== null && typeof item === "object") {
+            return Object.fromEntries(Object.keys(item).sort().map((key) => [key, ordered(item[key])]));
+        }
+        return item;
+    };
+    return JSON.stringify(ordered(normalized));
+}
+
+function ingest_json_value(value: any, fallback: any): any {
+    if (value === null || value === undefined) return fallback;
+    if (typeof value !== "string") return value;
+    try { return JSON.parse(value); } catch { return value; }
+}
+
+export function compute_ingest_hash(content: string, tags?: string, metadata?: any, user_id?: string): string {
+    return crypto.createHash("sha256").update(canonical_ingest_json({
+        content, tags: ingest_json_value(tags, null), metadata: metadata || {},
+        user_id: user_id || "anonymous",
+    }), "utf8").digest("hex");
+}
+
 export async function add_hsg_memory(
     content: string,
     tags?: string,
@@ -1120,8 +1147,17 @@ export async function add_hsg_memory(
     deduplicated?: boolean;
 }> {
     const simhash = compute_simhash(content);
-    const existing = await q.get_mem_by_simhash.get(simhash);
-    if (existing && hamming_dist(simhash, existing.simhash) <= 3) {
+    const ingest_hash = compute_ingest_hash(content, tags, metadata, user_id);
+    const embedding_plan = deriveStorageEmbeddingPlan(content, metadata);
+    const stored_content = extract_essence(content, embedding_plan.primary, env.summary_max_length);
+    const candidates = await q.get_mem_by_ingest_hash.all(ingest_hash);
+    const existing = candidates.find((candidate) =>
+        candidate.content === stored_content
+        && candidate.user_id === (user_id || "anonymous")
+        && canonical_ingest_json(ingest_json_value(candidate.tags, null)) === canonical_ingest_json(ingest_json_value(tags, null))
+        && canonical_ingest_json(ingest_json_value(candidate.meta, {})) === canonical_ingest_json(metadata || {}),
+    );
+    if (existing) {
         const now = Date.now();
         const boosted_sal = Math.min(1, existing.salience + 0.15);
         await q.upd_seen.run(existing.id, now, boosted_sal, now);
@@ -1134,7 +1170,6 @@ export async function add_hsg_memory(
     }
     const id = crypto.randomUUID();
     const now = Date.now();
-    const embedding_plan = deriveStorageEmbeddingPlan(content, metadata);
     await transaction.begin();
     try {
         const max_seg_res = await q.get_max_segment.get();
@@ -1148,11 +1183,6 @@ export async function add_hsg_memory(
                 `[HSG] Rotated to segment ${cur_seg} (previous segment full: ${seg_cnt} memories)`,
             );
         }
-        const stored_content = extract_essence(
-            content,
-            embedding_plan.primary,
-            env.summary_max_length,
-        );
         const sec_cfg = sector_configs[embedding_plan.primary];
         const init_sal = Math.max(
             0,
@@ -1178,6 +1208,7 @@ export async function add_hsg_memory(
             null, // compressed_vec
             0, // feedback_score
         );
+        await q.set_ingest_hash.run(id, ingest_hash);
         const { embeddings: emb_res } = await embedContentForStorage(
             id,
             content,

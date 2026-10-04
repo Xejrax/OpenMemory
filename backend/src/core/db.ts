@@ -19,6 +19,8 @@ type q_type = {
     del_mem: { run: (...p: any[]) => Promise<void> };
     get_mem: { get: (id: string) => Promise<any> };
     get_mem_by_simhash: { get: (simhash: string) => Promise<any> };
+    get_mem_by_ingest_hash: { all: (hash: string) => Promise<any[]> };
+    set_ingest_hash: { run: (id: string, hash: string) => Promise<void> };
     all_mem: { all: (limit: number, offset: number) => Promise<any[]> };
     all_mem_by_sector: {
         all: (sector: string, limit: number, offset: number) => Promise<any[]>;
@@ -155,6 +157,9 @@ if (is_pg) {
         await pg.query(
             `create table if not exists ${m}(id uuid primary key,user_id text,segment integer default 0,content text not null,simhash text,primary_sector text not null,tags text,meta text,created_at bigint,updated_at bigint,last_seen_at bigint,salience double precision,decay_lambda double precision,version integer default 1,mean_dim integer,mean_vec bytea,compressed_vec bytea,feedback_score double precision default 0)`,
         );
+        // Exact identity is additive; historical rows and similarity hashes stay intact.
+        await pg.query(`alter table ${m} add column if not exists ingest_hash text`);
+        await pg.query(`create index if not exists openmemory_memories_ingest_hash_idx on ${m}(ingest_hash) where ingest_hash is not null`);
         await pg.query(
             `create table if not exists ${v}(id uuid,sector text,user_id text,v bytea,dim integer not null,primary key(id,sector))`,
         );
@@ -287,6 +292,12 @@ if (is_pg) {
                     `select * from ${m} where simhash=$1 order by salience desc limit 1`,
                     [simhash],
                 ),
+        },
+        get_mem_by_ingest_hash: {
+            all: (hash) => all_async(`select * from ${m} where ingest_hash=$1`, [hash]),
+        },
+        set_ingest_hash: {
+            run: (id, hash) => run_async(`update ${m} set ingest_hash=$2 where id=$1`, [id, hash]),
         },
         all_mem: {
             all: (limit, offset) =>
@@ -520,6 +531,25 @@ if (is_pg) {
         );
     });
     memories_table = "memories";
+    // This inspection is queued after serialized initialization. Identity operations
+    // await migration; no existing content/metadata is rewritten or backfilled.
+    const ingest_ready = new Promise<void>((resolve, reject) => {
+        db.all("PRAGMA table_info(memories)", (error, columns: any[]) => {
+            if (error) { reject(error); return; }
+            const index = () => db.run(
+                "create index if not exists idx_memories_ingest_hash on memories(ingest_hash) where ingest_hash is not null",
+                (error) => error ? reject(error) : resolve(),
+            );
+            if (columns.some((column) => column.name === "ingest_hash")) {
+                index();
+            } else {
+                db.run("alter table memories add column ingest_hash text", (error) => {
+                    if (error) reject(error); else index();
+                });
+            }
+        });
+    });
+    ingest_ready.catch((error) => console.error("[DB] Exact ingest identity unavailable:", error));
     const exec = (sql: string, p: any[] = []) =>
         new Promise<void>((ok, no) =>
             db.run(sql, p, (err) => (err ? no(err) : ok())),
@@ -630,6 +660,18 @@ if (is_pg) {
                     "select * from memories where simhash=? order by salience desc limit 1",
                     [simhash],
                 ),
+        },
+        get_mem_by_ingest_hash: {
+            all: async (hash) => {
+                await ingest_ready;
+                return many("select * from memories where ingest_hash=?", [hash]);
+            },
+        },
+        set_ingest_hash: {
+            run: async (id, hash) => {
+                await ingest_ready;
+                await exec("update memories set ingest_hash=? where id=?", [hash, id]);
+            },
         },
         all_mem: {
             all: (limit, offset) =>
