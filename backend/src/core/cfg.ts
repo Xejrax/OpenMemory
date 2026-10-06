@@ -1,5 +1,6 @@
 import path from "path";
 import dotenv from "dotenv";
+import { parse_bind_hosts } from "./bind_hosts";
 
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 const num = (v: string | undefined, d: number) => Number(v) || d;
@@ -70,6 +71,9 @@ for (const [name, value] of Object.entries({
 
 export const env = {
     port: num(process.env.OM_PORT, 8080),
+    // OM_HOST (bazz-h835k.10.2.1): optional bind address(es), comma-separated.
+    // Unset/blank => [] => listen(port) exactly as before (all interfaces).
+    hosts: parse_bind_hosts(process.env.OM_HOST),
     db_path: str(
         process.env.OM_DB_PATH,
         path.resolve(__dirname, "../../data/openmemory.sqlite"),
