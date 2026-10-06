@@ -2,6 +2,22 @@ import { all_async } from "../../core/db";
 import { sector_configs } from "../../memory/hsg";
 import { getEmbeddingInfo } from "../../memory/embed";
 import { tier, env } from "../../core/cfg";
+import { createEmbedHealthChecker, healthHandler } from "../embed_health";
+
+const int_env = (v: string | undefined, d: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 && v !== undefined && v !== "" ? n : d;
+};
+// Provider reachability for /health (beads-d8luz.7.1). Short timeout, cached, single-flight.
+const embed_health = createEmbedHealthChecker({
+    provider: env.emb_kind,
+    url: env.emb_kind === "ollama" ? env.ollama_url : env.fastembed_url,
+    timeout_ms: int_env(process.env.OM_HEALTH_EMBED_TIMEOUT_MS, 1500),
+    ttl_ms: int_env(process.env.OM_HEALTH_EMBED_CACHE_MS, 10000),
+});
+// 503 by default; OM_HEALTH_DEGRADED_HTTP=200 keeps liveness-only probes green while the body
+// still says status:"degraded".
+const DEGRADED_HTTP = int_env(process.env.OM_HEALTH_DEGRADED_HTTP, 503);
 
 const TIER_BENEFITS = {
     hybrid: {
@@ -33,17 +49,18 @@ const TIER_BENEFITS = {
 export function sys(app: any) {
     app.get(
         "/health",
-        async (incoming_http_request: any, outgoing_http_response: any) => {
-            outgoing_http_response.json({
-                ok: true,
+        healthHandler(
+            embed_health,
+            () => ({
                 version: "2.0-hsg-tiered",
                 embedding: getEmbeddingInfo(),
                 tier,
                 dim: env.vec_dim,
                 cache: env.cache_segments,
                 expected: TIER_BENEFITS[tier],
-            });
-        },
+            }),
+            DEGRADED_HTTP,
+        ),
     );
 
     app.get(

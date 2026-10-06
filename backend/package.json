@@ -11,6 +11,7 @@
         "build": "tsc -p tsconfig.json",
         "test:contracts": "tsx tests/verify_fastembed_db_contracts.mts",
         "test:om-host": "tsx tests/verify_om_host_bind.mts",
+        "test:health-embed": "tsx tests/verify_health_embed_degraded.mts",
         "start": "node dist/server/index.js",
         "migrate": "tsx src/migrate.ts"
     },
