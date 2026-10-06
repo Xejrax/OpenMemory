@@ -113,6 +113,33 @@ function server(config = {}) {
     const add = (a, b, c) => { ROUTES.push({ method: a.toUpperCase(), path: b, handler: c }); };
     const use = (a) => { WARES.push(a); };
     const listen = (a, b) => { SERVER.setTimeout(10000); SERVER.listen(a, b); };
+    // listenHosts (bazz-h835k.10.2.1, OM_HOST): bind the SAME request/upgrade
+    // handlers on one or more explicit addresses (e.g. 127.0.0.1 + a tailnet IP).
+    // Only used when OM_HOST is set; the default path stays listen(port, cb).
+    const EXTRA_SERVERS = [];
+    const listenHosts = (port, hosts, cb) => {
+        if (!Array.isArray(hosts) || hosts.length === 0)
+            return listen(port, cb);
+        let pending = hosts.length;
+        const done = () => { if (--pending === 0 && typeof cb === 'function') cb(); };
+        hosts.forEach((h, i) => {
+            let s = SERVER;
+            if (i > 0) {
+                s = http.createServer();
+                SERVER.listeners('request').forEach((l) => s.on('request', l));
+                SERVER.listeners('upgrade').forEach((l) => s.on('upgrade', l));
+                EXTRA_SERVERS.push(s);
+            }
+            s.setTimeout(10000);
+            s.listen(port, h, done);
+        });
+    };
+    const close = (cb) => {
+        let pending = 1 + EXTRA_SERVERS.length;
+        const done = () => { if (--pending === 0 && typeof cb === 'function') cb(); };
+        [SERVER, ...EXTRA_SERVERS].forEach((s) => (s.listening ? s.close(done) : done()));
+    };
+    const addresses = () => [SERVER, ...EXTRA_SERVERS].filter((s) => s.listening).map((s) => s.address());
     const all = (a, b) => { add('ALL', a, b); };
     const getRoutes = () => ROUTES.reduce((acc, { method, path }) => ((acc[method] = acc[method] || []).push(path), acc), {});
     const serverStatic = (endpoint, dir) => {
@@ -184,6 +211,9 @@ function server(config = {}) {
     return {
         use,
         listen,
+        listenHosts,
+        close,
+        addresses,
         all,
         serverStatic,
         routes: ROUTES,

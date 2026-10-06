@@ -123,12 +123,20 @@ const start = async () => {
     start_user_summary_reflection();
 
     console.log(`[SERVER] Starting on port ${env.port}`);
-    app.listen(env.port, () => {
+    const on_listening = () => {
         console.log(`[SERVER] Running on http://localhost:${env.port}`);
         sendTelemetry().catch(() => {
             // ignore telemetry failures
         });
-    });
+    };
+    if (env.hosts.length === 0) {
+        // Default (OM_HOST unset): unchanged — all interfaces.
+        app.listen(env.port, on_listening);
+    } else {
+        // OM_HOST set (bazz-h835k.10.2.1): bind only the listed address(es).
+        console.log(`[SERVER] OM_HOST bind: ${env.hosts.join(", ")}`);
+        app.listenHosts(env.port, env.hosts, on_listening);
+    }
 };
 
 start().catch((error) => {
